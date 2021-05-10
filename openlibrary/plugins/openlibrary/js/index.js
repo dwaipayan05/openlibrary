@@ -93,6 +93,11 @@ jQuery(function () {
         import(/* webpackChunkName: "editions-table" */ './editions-table')
             .then(module => module.initEditionsTable());
     }
+    // conditionally load for user edit page
+    if (document.getElementById('add_row_button')) {
+        import(/* webpackChunkName: "user-website" */ './edit')
+            .then(module => module.initEditRow());
+    }
     // conditionally load real time signup functionality based on class in the page
     if (document.getElementsByClassName('olform create validate').length) {
         import('./realtime_account_validation.js')
@@ -140,7 +145,7 @@ jQuery(function () {
             .then((module) => module.init());
     }
 
-    if (document.getElementById('modal-link')) {
+    if (document.getElementsByClassName('modal-link').length) {
         import(/* webpackChunkName: "patron_metadata" */ './patron-metadata')
             .then((module) => module.initPatronMetadata());
     }
@@ -149,9 +154,47 @@ jQuery(function () {
         import (/* webpackChunkName: "books_edit" */ './edit.js')
             .then((module) => module.initEdit());
     }
+
+    if (document.getElementById('links')) {
+        import (/* webpackChunkName: "books_edit" */ './edit.js')
+            .then((module) => module.initEditLinks());
+    }
+
+    if (document.getElementsByClassName('manageCovers').length) {
+        import(/* webpackChunkName: "covers" */ './covers')
+            .then((module) => module.initCoversChange());
+    }
+
+    // Load from iframe
     if (document.getElementsByClassName('imageIntro').length) {
-        import(/* webpackChunkName: "book_cover_manage" */ './cover_add_manage')
-            .then(module => module.initAddCoverImport());
+        import('./covers')
+            .then((module) => module.initCoversAddManage());
+    }
+
+    // Load from iframe
+    if (document.getElementsByClassName('imageSaved').length) {
+        import('./covers')
+            .then((module) => module.initCoversSaved());
+    }
+
+    if (document.getElementById('addbook')) {
+        import(/* webpackChunkName: "add-book" */ './add-book')
+            .then(module => module.initAddBookImport());
+    }
+
+    if (document.getElementById('adminLinks')) {
+        import(/* webpackChunkName: "admin" */ './admin')
+            .then((module) => module.initAdmin());
+    }
+
+    if (document.getElementById('searchFacets')) {
+        import(/* webpackChunkName: "search" */ './search')
+            .then((module) => {
+                module.initSearchFacets();
+                if (document.getElementById('adminTiming')) {
+                    module.initAdminTiming();
+                }
+            });
     }
 
     if ($('#cboxPrevious').length) {

@@ -1,4 +1,3 @@
-import json
 
 import web
 import logging
@@ -240,7 +239,16 @@ class account_create(delegate.page):
                 # Create ia_account: require they activate via IA email
                 # and then login to OL. Logging in after activation with
                 # IA credentials will auto create and link OL account.
-                notifications = ['announce-general'] if f.ia_newsletter.checked else []
+
+                """NOTE: the values for the notifications must be kept in sync
+                with the values in the `MAILING_LIST_KEYS` array in
+                https://git.archive.org/ia/petabox/blob/master/www/common/MailSync/Settings.inc
+                Currently, per the fundraising/development team, the
+                "announcements checkbox" should map to BOTH `ml_best_of` and
+                `ml_updates`
+                """  # nopep8
+                mls = ['ml_best_of', 'ml_updates']
+                notifications = mls if f.ia_newsletter.checked else []
                 InternetArchiveAccount.create(
                     screenname=f.username.value, email=f.email.value, password=f.password.value,
                     notifications=notifications, verified=False, retries=USERNAME_RETRIES)
@@ -902,6 +910,22 @@ class account_loans(delegate.page):
         user.update_loan_status()
         loans = borrow.get_loans(user)
         return render['account/borrow'](user, loans)
+
+class account_loans_json(delegate.page):
+
+    encoding = "json"
+    path = "/account/loans"
+
+    @require_login
+    def GET(self):
+        user = accounts.get_current_user()
+        user.update_loan_status()
+        loans = borrow.get_loans(user)
+        web.header('Content-Type', 'application/json')
+        return delegate.RawText(json.dumps({
+            "loans": loans
+        }))
+
 
 # Disabling be cause it prevents account_my_books_redirect from working
 # for some reason. The purpose of this class is to not show the "Create" link for

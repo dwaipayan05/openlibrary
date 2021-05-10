@@ -15,6 +15,22 @@ function update_len() {
     $('#excerpts-excerpt-len').html(2000 - len).css('color', color);
 }
 
+export function initEditRow(){
+    document.querySelector('#add_row_button').addEventListener('click', ()=>add_row('website'));
+}
+
+/**
+ * Adds another input box below the last when adding multiple websites to user profile.
+ * @param string name - when prefixed with clone_ should match an element identifier in the page. e.g. if name would refer to clone_website
+**/
+function add_row(name) {
+    const inputBoxes = document.querySelectorAll(`#clone_${name} input`);
+    const inputBox = document.createElement('input');
+    inputBox.name = `${name}#${inputBoxes.length}`;
+    inputBox.type = 'text';
+    inputBoxes[inputBoxes.length-1].after(inputBox);
+}
+
 function show_hide_title() {
     if ($('#excerpts-display .repeat-item').length > 1) {
         $('#excerpts-so-far').show();
@@ -54,4 +70,37 @@ export function initEdit() {
     // update length on load
     update_len();
     show_hide_title();
+}
+
+/**
+ * Initializes links element on edit page.
+ *
+ * Assumes presence of elements with id:
+ *    - '#links' and 'data-prefix' attribute
+ *    - '#link-label'
+ *    - '#link-url'
+ *    - '#link-errors'
+ */
+export function initEditLinks() {
+    $('#links').repeat({
+        vars: {
+            prefix: $('#links').data('prefix')
+        },
+        validate: function(data) {
+            if ($.trim(data.url) === '' || $.trim(data.url) === 'https://') {
+                $('#link-errors').html('Please provide a URL.');
+                $('#link-errors').removeClass('hidden');
+                $('#link-url').focus();
+                return false;
+            }
+            if ($.trim(data.title) === '') {
+                $('#link-errors').html('Please provide a label.');
+                $('#link-errors').removeClass('hidden');
+                $('#link-label').focus();
+                return false;
+            }
+            $('#link-errors').addClass('hidden');
+            return true;
+        }
+    });
 }

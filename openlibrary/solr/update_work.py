@@ -4,6 +4,9 @@ import itertools
 import logging
 import os
 import re
+from typing import Literal, List
+
+import httpx
 import requests
 import sys
 import time
@@ -44,15 +47,6 @@ _ia_db = None
 solr_base_url = None
 
 
-def urlopen(url, params=None, data=None):
-    version = "%s.%s.%s" % sys.version_info[:3]
-    user_agent = 'Mozilla/5.0 (openlibrary; %s) Python/%s' % (__file__, version)
-    headers = {
-        'User-Agent': user_agent
-    }
-    response = requests.post(url, params=params, data=data, headers=headers)
-    return response
-
 def get_solr_base_url():
     """
     Get Solr host
@@ -67,6 +61,11 @@ def get_solr_base_url():
         solr_base_url = config.runtime_config['plugin_worksearch']['solr_base_url']
 
     return solr_base_url
+
+
+def set_solr_base_url(solr_url: str):
+    global solr_base_url
+    solr_base_url = solr_url
 
 
 def get_ia_collection_and_box_id(ia):
@@ -273,6 +272,23 @@ def datetimestr_to_int(datestr):
 
     return int(time.mktime(t.timetuple()))
 
+
+def safeget(func):
+    """
+    TODO: DRY with solrbuilder copy
+    >>> safeget(lambda: {}['foo'])
+    >>> safeget(lambda: {}['foo']['bar'][0])
+    >>> safeget(lambda: {'foo': []}['foo'][0])
+    >>> safeget(lambda: {'foo': {'bar': [42]}}['foo']['bar'][0])
+    42
+    >>> safeget(lambda: {'foo': 'blah'}['foo']['bar'])
+    """
+    try:
+        return func()
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 class SolrProcessor:
     """Processes data to into a form suitable for adding to works solr.
     """
@@ -339,6 +355,37 @@ class SolrProcessor:
                             identifiers[k].append(v)
         return sorted(editions, key=lambda e: int(e.get('pub_year') or -sys.maxsize))
 
+    @staticmethod
+    def normalize_authors(authors) -> List[dict]:
+        """
+        Need to normalize to a predictable format because of inconsitencies in data
+
+        >>> SolrProcessor.normalize_authors([
+        ...     {'type': {'key': '/type/author_role'}, 'author': '/authors/OL1A'}
+        ... ])
+        [{'type': {'key': '/type/author_role'}, 'author': {'key': '/authors/OL1A'}}]
+        >>> SolrProcessor.normalize_authors([{
+        ...     "type": {"key": "/type/author_role"},
+        ...     "author": {"key": "/authors/OL1A"}
+        ... }])
+        [{'type': {'key': '/type/author_role'}, 'author': {'key': '/authors/OL1A'}}]
+        """
+        return [
+            {
+                'type': {
+                    'key': safeget(lambda: a['type']['key']) or '/type/author_role'
+                },
+                'author': (
+                    a['author'] if isinstance(a['author'], dict)
+                    else {'key': a['author']}
+                )
+            }
+            for a in authors
+            # TODO: Remove after
+            #  https://github.com/internetarchive/openlibrary-client/issues/126
+            if 'author' in a
+        ]
+
     def get_author(self, a):
         """
         Get author dict from author entry in the work.
@@ -349,16 +396,10 @@ class SolrProcessor:
         :return: Full author document
         :rtype: dict or None
         """
-        # TODO is this still an active problem?
-        if 'author' not in a: # OL Web UI bug
-            return # http://openlibrary.org/works/OL15365167W.yml?m=edit&v=1
-
-        author = a['author']
-
-        if 'type' in author:
+        if 'type' in a['author']:
             # means it is already the whole object.
             # It'll be like this when doing re-indexing of solr.
-            return author
+            return a['author']
 
         key = a['author']['key']
         m = re_author_key.match(key)
@@ -376,8 +417,7 @@ class SolrProcessor:
         """
         authors = [
             self.get_author(a)
-            for a in w.get("authors", [])
-            if 'author' in a  # TODO: Remove after https://github.com/internetarchive/openlibrary-client/issues/126
+            for a in SolrProcessor.normalize_authors(w.get("authors", []))
         ]
 
         if any(a['type']['key'] == '/type/redirect' for a in authors):
@@ -731,9 +771,13 @@ def build_data2(w, editions, authors, ia, duplicates):
     resolve_redirects = False
 
     assert w['type']['key'] == '/type/work'
-    title = w.get('title', None)
-    if not title:
-        return
+    # Some works are missing a title, but have titles on their editions
+    w['title'] = next(itertools.chain(
+        (book['title'] for book in itertools.chain([w], editions) if book.get('title')),
+        ['__None__']
+    ))
+    if w['title'] == '__None__':
+        logger.warning('Work missing title %s' % w['key'])
 
     p = SolrProcessor(resolve_redirects)
 
@@ -848,15 +892,46 @@ def build_data2(w, editions, authors, ia, duplicates):
 
     return doc
 
-def solr_update(requests, debug=False, commitWithin=60000):
+
+async def solr_insert_documents(
+        documents: List[dict],
+        commit_within=60_000,
+        solr_base_url: str = None,
+        skip_id_check=False,
+):
+    """
+    Note: This has only been tested with Solr 8, but might work with Solr 3 as well.
+    """
+    solr_base_url = solr_base_url or get_solr_base_url()
+    params = {}
+    if commit_within is not None:
+        params['commitWithin'] = commit_within
+    if skip_id_check:
+        params['overwrite'] = 'false'
+    logger.info(f"POSTing update to {solr_base_url}/update {params}")
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f'{solr_base_url}/update',
+            timeout=30,  # The default timeout is silly short
+            params=params,
+            headers={'Content-Type': 'application/json'},
+            content=json.dumps(documents)
+        )
+    resp.raise_for_status()
+
+
+def solr_update(requests, debug=False, commitWithin=60000, solr_base_url: str = None):
     """POSTs a collection of update requests to Solr.
     TODO: Deprecate and remove string requests. Is anything else still generating them?
     :param list[string or UpdateRequest or DeleteRequest] requests: Requests to send to Solr
     :param bool debug:
     :param int commitWithin: Solr commitWithin, in ms
     """
-    url = get_solr_base_url() + '/update'
+    solr_base_url = solr_base_url or get_solr_base_url()
+    url = f'{solr_base_url}/update'
     parsed_url = urlparse(url)
+    assert parsed_url.hostname
+
     if parsed_url.port:
         h1 = HTTPConnection(parsed_url.hostname, parsed_url.port)
     else:
@@ -1112,18 +1187,18 @@ def get_subject(key):
     subject_key = str_to_key(subject_key)
     key = "/subjects/%s:%s" % (subject_type, subject_key)
 
-    params = {
-        'wt': 'json',
-        'json.nl': 'arrarr',
-        'q': '%s:%s' % (search_field, subject_key),
-        'rows': '0',
-        'facet': 'true',
-        'facet.field': facet_field,
-        'facet.mincount': 1,
-        'facet.limit': 100
-    }
-    base_url = get_solr_base_url() + '/select'
-    result = urlopen(base_url, params).json()
+    result = requests.get(
+        f'{get_solr_base_url()}/select',
+        params={
+            'wt': 'json',
+            'json.nl': 'arrarr',
+            'q': f'{search_field}:{subject_key}',
+            'rows': 0,
+            'facet': 'true',
+            'facet.field': facet_field,
+            'facet.mincount': 1,
+            'facet.limit': 100,
+        }).json()
 
     work_count = result['response']['numFound']
     facets = result['facet_counts']['facet_fields'].get(facet_field, [])
@@ -1153,6 +1228,32 @@ def update_subject(key):
     return request_set.get_requests()
 
 
+def subject_name_to_key(
+        subject_type: Literal['subject', 'person', 'place', 'time'],
+        subject_name: str
+) -> str:
+    escaped_subject_name = str_to_key(subject_name)
+    if subject_type == 'subject':
+        return f"/subjects/{escaped_subject_name}"
+    else:
+        return f"/subjects/{subject_type}:{escaped_subject_name}"
+
+
+def build_subject_doc(
+        subject_type: Literal['subject', 'person', 'place', 'time'],
+        subject_name: str,
+        work_count: int,
+):
+    """Build the `type:subject` solr doc for this subject."""
+    return {
+        'key': subject_name_to_key(subject_type, subject_name),
+        'name': subject_name,
+        'type': 'subject',
+        'subject_type': subject_type,
+        'work_count': work_count,
+    }
+
+
 def update_work(work):
     """
     Get the Solr requests necessary to insert/update this work into Solr.
@@ -1172,14 +1273,14 @@ def update_work(work):
 
     # Handle edition records as well
     # When an edition does not contain a works list, create a fake work and index it.
-    if work['type']['key'] == '/type/edition' and work.get('title'):
+    if work['type']['key'] == '/type/edition':
         fake_work = {
             # Solr uses type-prefixed keys. It's required to be unique across
             # all types of documents. The website takes care of redirecting
             # /works/OL1M to /books/OL1M.
             'key': wkey.replace("/books/", "/works/"),
             'type': {'key': '/type/work'},
-            'title': work['title'],
+            'title': work.get('title'),
             'editions': [work],
             'authors': [{'type': '/type/author_role', 'author': {'key': a['key']}} for a in work.get('authors', [])]
         }
@@ -1187,7 +1288,7 @@ def update_work(work):
         if work.get("subjects"):
             fake_work['subjects'] = work['subjects']
         return update_work(fake_work)
-    elif work['type']['key'] == '/type/work' and work.get('title'):
+    elif work['type']['key'] == '/type/work':
         try:
             solr_doc = build_data(work)
             dict2element(solr_doc)
@@ -1202,7 +1303,7 @@ def update_work(work):
     elif work['type']['key'] in ['/type/delete', '/type/redirect']:
         requests.append(DeleteRequest([wkey]))
     else:
-        logger.error("unrecognized type while updating work %s", wkey, exc_info=True)
+        logger.error("unrecognized type while updating work %s", wkey)
 
     return requests
 
@@ -1214,7 +1315,7 @@ def make_delete_query(keys):
     Example:
 
     >>> make_delete_query(["/books/OL1M"])
-    '<delete><query>key:/books/OL1M</query></delete>'
+    '<delete><id>/books/OL1M</id></delete>'
 
     :param list[str] keys: Keys to create delete tags for. (ex: ["/books/OL1M"])
     :return: <delete> XML element as a string
@@ -1224,8 +1325,8 @@ def make_delete_query(keys):
     keys = [solr_escape(key) for key in keys]
     delete_query = Element('delete')
     for key in keys:
-        query = SubElement(delete_query,'query')
-        query.text = 'key:%s' % key
+        query = SubElement(delete_query, 'id')
+        query.text = key
     return tostring(delete_query, encoding="unicode")
 
 def update_author(akey, a=None, handle_redirects=True):
@@ -1271,7 +1372,7 @@ def update_author(akey, a=None, handle_redirects=True):
     work_count = reply['response']['numFound']
     docs = reply['response'].get('docs', [])
     top_work = None
-    if docs:
+    if docs and docs[0].get('title', None):
         top_work = docs[0]['title']
         if docs[0].get('subtitle', None):
             top_work += ': ' + docs[0]['subtitle']
@@ -1336,12 +1437,14 @@ def solr_select_work(edition_key):
         return None
 
     edition_key = solr_escape(edition_key)
-
-    url = '%s/select?wt=json&q=edition_key:%s&rows=1&fl=key' % (
-        get_solr_base_url(),
-        url_quote(edition_key)
-    )
-    reply = urlopen(url).json()
+    reply = requests.get(
+        f'{get_solr_base_url()}/select',
+        params={
+            'wt': 'json',
+            'q': f'edition_key:{edition_key}',
+            'rows': 1,
+            'fl': 'key',
+        }).json()
     docs = reply['response'].get('docs', [])
     if docs:
         return docs[0]['key'] # /works/ prefix is in solr

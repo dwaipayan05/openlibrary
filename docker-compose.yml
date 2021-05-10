@@ -1,30 +1,14 @@
 version: "3.1"
 services:
   web:
-    image: oldev:latest
+    image: "${OLIMAGE:-oldev:latest}"
     environment:
       - PYENV_VERSION=${PYENV_VERSION:-}
       - OL_CONFIG=${OL_CONFIG:-/openlibrary/conf/openlibrary.yml}
       - GUNICORN_OPTS=${GUNICORN_OPTS:- --reload --workers 4 --timeout 180}
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.oldev
     command: docker/ol-web-start.sh
     ports:
       - ${WEB_PORT:-8080}:8080
-    depends_on:
-      - db
-      - infobase
-    volumes:
-      # Persistent volume mount for installed git submodules
-      - ol-vendor:/openlibrary/vendor
-      # Persistent volume mount for generated css and js
-      - ol-build:/openlibrary/static/build
-      # Persistent volume mount for node_modules
-      - ol-nodemodules:/openlibrary/node_modules
-      # The above volume mounts are required so that the local dev bind mount below
-      # does not clobber the data generated inside the image / container
-      - .:/openlibrary
     networks:
       - webnet
       - dbnet
@@ -32,6 +16,7 @@ services:
       options:
         max-size: "512m"
         max-file: "4"
+
   solr:
     image: olsolr:latest
     build:
@@ -50,24 +35,18 @@ services:
       options:
         max-size: "512m"
         max-file: "4"
+
   solr-updater:
-    image: oldev:latest
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.oldev
+    image: "${OLIMAGE:-oldev:latest}"
     command: docker/ol-solr-updater-start.sh
     restart: always
     hostname: "$HOSTNAME"
     environment:
       - OL_CONFIG=conf/openlibrary.yml
-      - PYENV_VERSION=${PYENV_VERSION:-}
+      - PYENV_VERSION=${PYENV_VERSION:-3.9.4}
       - OL_URL=http://web:8080/
+      - STATE_FILE=solr-update.offset
     volumes:
-      # Persistent volume mount for installed git submodules
-      - ol-vendor:/openlibrary/vendor
-      # The above volume mounts is required so that the local dev bind mount below
-      # does not clobber the data generated inside the image / container
-      - .:/openlibrary
       - solr-updater-data:/solr-updater-data
     networks:
       - webnet
@@ -77,31 +56,16 @@ services:
     image: memcached
     networks:
       - webnet
-  db:
-    image: postgres:9.3
-    networks:
-      - dbnet
-    volumes:
-      - .:/openlibrary
-      # Any files inside /docker-entrypoint-initdb.d/ will get run by postgres
-      # if the db is empty (which as of now is always, since we don't store the
-      # postgres data anywhere).
-      - ./docker/ol-db-init.sh:/docker-entrypoint-initdb.d/ol-db-init.sh
+
   covers:
-    image: oldev:latest
+    image: "${OLIMAGE:-oldev:latest}"
     environment:
       - PYENV_VERSION=${PYENV_VERSION:-}
       - COVERSTORE_CONFIG=${COVERSTORE_CONFIG:-/openlibrary/conf/coverstore.yml}
       - GUNICORN_OPTS=${GUNICORN_OPTS:- --reload --workers 1 --max-requests 250}
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.oldev
     command: docker/ol-covers-start.sh
     expose:
       - 7075
-    volumes:
-      - ol-vendor:/openlibrary/vendor
-      - .:/openlibrary
     networks:
       - webnet
       - dbnet
@@ -109,23 +73,16 @@ services:
       options:
         max-size: "512m"
         max-file: "4"
+
   infobase:
-    image: oldev:latest
+    image: "${OLIMAGE:-oldev:latest}"
     environment:
       - PYENV_VERSION=${PYENV_VERSION:-}
       - INFOBASE_CONFIG=${INFOBASE_CONFIG:-/openlibrary/conf/infobase.yml}
       - INFOBASE_OPTS=${INFOBASE_OPTS:-}
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.oldev
     command: docker/ol-infobase-start.sh
     expose:
       - 7000
-    depends_on:
-      - db
-    volumes:
-      - ol-vendor:/openlibrary/vendor
-      - .:/openlibrary
     networks:
       - webnet
       - dbnet
@@ -133,32 +90,10 @@ services:
       options:
         max-size: "512m"
         max-file: "4"
-  home:
-    image: oldev:latest
-    environment:
-      - PYENV_VERSION=${PYENV_VERSION:-}
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.oldev
-    command: docker/ol-home-start.sh
-    volumes:
-      - ol-vendor:/openlibrary/vendor
-      - ol-build:/openlibrary/static/build
-      - ol-nodemodules:/openlibrary/node_modules
-      - .:/openlibrary
-    networks:
-      - webnet
-      - dbnet
-    logging:
-      options:
-        max-size: "512m"
-        max-file: "4"
+
 networks:
   webnet:
   dbnet:
 volumes:
   solr-data:
   solr-updater-data:
-  ol-vendor:
-  ol-build:
-  ol-nodemodules:
