@@ -1,6 +1,6 @@
 ## This image is where we should execute the Jenkins commands
 
-FROM ubuntu:xenial
+FROM ubuntu:xenial-20201014
 ARG DOCKER_VERSION=5:18.09.0~3-0~ubuntu-xenial
 
 # Docker dependencies
